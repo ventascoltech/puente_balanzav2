@@ -1,0 +1,11 @@
+serial_port = "/dev/ttyS0"
+baud_rate = 9600
+data_bits = "7"
+parity = "None"
+stop_bits = "1"
+timeout_ms = 1400
+cache_duration_ms = 600
+w_duration_ms = 100
+w_response_timeout_ms = 500
+tcp_address = "0.0.0.0:2029"
+recargar_configuracion = true

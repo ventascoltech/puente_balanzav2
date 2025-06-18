@@ -1,0 +1,83 @@
+// === src/serial_reader.rs ===
+use std::io::{Read, Write};
+use flume::Receiver;
+use std::thread;
+
+use anyhow::Context;
+use log::{debug, info, warn};
+use serialport::SerialPort;
+
+use crate::cache::SharedCache;
+use crate::serial_processor::ensamblar_y_filtrar_datos;
+use crate::serial_utils::sanitize_log_data;
+
+/// Inicia el hilo de lectura desde el puerto serial.
+pub fn start_serial_reader(
+    mut serial: Box<dyn SerialPort>,
+    cache: SharedCache,
+    rx_serial_write: Receiver<Vec<u8>>,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0u8; 1024];
+        let mut partial_data = Vec::new();
+
+        info!("🟡 Hilo de lectura serial iniciado. Esperando datos de la báscula...");
+
+        loop {
+            // Intentar recibir un comando por canal (no bloqueante)
+            match rx_serial_write.try_recv() {
+                Ok(comando) => {
+                    if let Err(e) = serial
+                        .write_all(&comando)
+                        .and_then(|_| serial.flush())
+                        .with_context(|| {
+                            format!(
+                                "Error al enviar comando serial: {}",
+                                sanitize_log_data(&comando)
+                            )
+                        })
+                    {
+                        warn!("⚠️ {}", e);
+                    } else {
+                        info!("📤 Comando enviado al puerto serial: {}", sanitize_log_data(&comando));
+                    }
+                }
+                Err(flume::TryRecvError::Empty) => {
+                    // No hay comando, continuar con la lectura
+                }
+                Err(flume::TryRecvError::Disconnected) => {
+                    warn!("⚠️ Canal de comandos desconectado. Terminando hilo serial.");
+                    break;
+                }
+            }
+
+            // Leer datos del puerto serial (bloqueante con timeout)
+            match serial.read(&mut buffer) {
+                Ok(bytes_read) if bytes_read > 0 => {
+                    let recibidos = &buffer[..bytes_read];
+                    debug!("📥 Bytes leídos (crudo): {}", sanitize_log_data(recibidos));
+
+                    match ensamblar_y_filtrar_datos(recibidos, &mut partial_data) {
+                        Some(msg) => {
+                            info!("✅ Dato completo de báscula recibido: {}", sanitize_log_data(&msg));
+                            cache.lock().set(msg);
+                        }
+                        None => {
+                            debug!("🧩 Fragmento acumulado: {}", sanitize_log_data(&partial_data));
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Nada leído, continuar
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    // Timeout esperado, no es error
+                }
+                Err(e) => {
+                    warn!("❌ Error al leer del puerto serial: {:?}", e);
+                }
+            }
+        }
+    });
+}
+
